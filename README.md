@@ -1,5 +1,5 @@
 # CSGNN
-the code of paper "Category-aware Self-supervised Graph Neural Network for Session-based Recommendation"
+Codes of paper "Category-aware Self-supervised Graph Neural Network for Session-based Recommendation"
 
 
 ## Requirements
