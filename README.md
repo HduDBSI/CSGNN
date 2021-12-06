@@ -4,7 +4,7 @@ Codes of paper "Category-aware Self-supervised Graph Neural Network for Session-
 
 ## Requirements
 - Python 3
-- Python 1.6.0
+- PyTorch 1.6.0
 
 you can create a new environment by conda
 ```shell
