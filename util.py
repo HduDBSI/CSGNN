@@ -5,10 +5,9 @@ from scipy.sparse import csr_matrix
 from operator import itemgetter
 
 
-# embeddings of pre-training
 def get_embedding(dataset, n_node, emb_size):
     embedding1 = np.random.random((n_node, emb_size // 2))
-    with open('./datasets/pre_train/' + dataset + '/' + str(emb_size) + '/embedding_tanh_order1', 'r') as f:
+    with open('../datasets/LINE/' + dataset + '/' + str(emb_size) + '/embedding_tanh_order1', 'r') as f:
         line = f.readline()
         while line:
             line = f.readline()
@@ -20,7 +19,7 @@ def get_embedding(dataset, n_node, emb_size):
                 for i in range(len(line)):
                     embedding1[start][i] = float(line[i])
     embedding2 = np.random.random((n_node, emb_size // 2))
-    with open('./datasets/pre_train/' + dataset + '/' + str(emb_size) + '/embedding_tanh_order2', 'r') as f:
+    with open('../datasets/LINE/' + dataset + '/' + str(emb_size) + '/embedding_tanh_order2', 'r') as f:
         line = f.readline()
         while line:
             line = f.readline()
@@ -39,21 +38,21 @@ def get_embedding(dataset, n_node, emb_size):
     return e
 
 
-# category-aware hypergraph
 def data_masks(all_sessions, all_categories, n_node, c_node):
     indptr, indices, data = [], [], []
     indptr.append(0)
     for j in range(len(all_sessions)):
-        session = np.unique(all_sessions[j])
+        session = np.unique(all_sessions[j])#获取数组中唯一值的函数,类似去重
         category = np.unique(all_categories[j])
-        category = np.add(category, n_node - 1)
-        session = np.append(session, category)
+        category = np.add(category, n_node - 1)#category中每个值加上n_node - 1
+        session = np.append(session, category)#将每个session中的数组 category 追加到数组 session 的末尾（异构超图）
         length = len(session)
         s = indptr[-1]
-        indptr.append((s + length))
+        indptr.append((s + length)) #indptr为一个表示session长度的数组,增加索引列
         for i in range(length):
             indices.append(session[i] - 1)
             data.append(1)
+			#csr_matrix创建一个CSR格式的稀疏矩阵的函数
     matrix = csr_matrix((data, indices, indptr), shape=(len(all_sessions), n_node + c_node))
 
     return matrix
@@ -110,42 +109,42 @@ def split_validation(train_set, valid_portion):
 
 class Data():
     def __init__(self, data, cate, shuffle=False, n_node=None, c_node=None):
-        self.raw = np.asarray(data[0])
+        self.raw = np.asarray(data[0]) #将data中的第一个元素转换为NumPy数组,并将转换后的数组赋值给self.raw属性
         self.cate_raw = np.asarray(cate[0])
         H_T = data_masks(self.raw, self.cate_raw, n_node, c_node)
-        BH_T = H_T.T.multiply(1.0 / H_T.sum(axis=1).reshape(1, -1))
+		#1.将H_T的每个元素除以对应行的和,得到新的稀疏矩阵2.将这个新稀疏矩阵与H_T.T(转置)逐元素相乘,得到一个新的稀疏矩阵BH_T。
+        BH_T = H_T.T.multiply(1.0 / H_T.sum(axis=1).reshape(1, -1))#.reshape(1, -1)将结果重新排列为一个行向量,sum(axis=1)计算H_T每行的和
         BH_T = BH_T.T
         H = H_T.T
+		#DH同上BH_T，是进行归一化处理
         DH = H.T.multiply(1.0 / H.sum(axis=1).reshape(1, -1))
         DH = DH.T
-        DHBH_T = np.dot(DH, BH_T)
-
+        DHBH_T = np.dot(DH, BH_T)#dot() NumPy中用于计算两个数组的矩阵乘法（内积）的函数
+#tocoo()用于将稀疏矩阵转换为COO格式(用于表示稀疏矩阵的格式，它存储非零元素的坐标及对应的值)
         self.adjacency = DHBH_T.tocoo()
         self.n_node = n_node
         self.targets = np.asarray(data[1])
         self.length = len(self.raw)
         self.shuffle = shuffle
 
-    # session graph
-    # def get_overlap(self, sessions):
-    #     matrix = np.zeros((len(sessions), len(sessions)))
-    #     for i in range(len(sessions)):
-    #         seq_a = set(sessions[i])
-    #         seq_a.discard(0)
-    #         for j in range(i + 1, len(sessions)):
-    #             seq_b = set(sessions[j])
-    #             seq_b.discard(0)
-    #             overlap = seq_a.intersection(seq_b)
-    #             ab_set = seq_a | seq_b
-    #             matrix[i][j] = float(len(overlap)) / float(len(ab_set))
-    #             matrix[j][i] = matrix[i][j]
-    #     matrix = matrix + np.diag([1.0] * len(sessions))
-    #     degree = np.sum(np.array(matrix), 1)
-    #     degree = np.diag(1.0 / degree)
-    #     return matrix, degree
+    def get_overlap(self, sessions):
+        matrix = np.zeros((len(sessions), len(sessions)))
+        for i in range(len(sessions)):
+            seq_a = set(sessions[i])
+            seq_a.discard(0)
+            for j in range(i + 1, len(sessions)):
+                seq_b = set(sessions[j])
+                seq_b.discard(0)
+                overlap = seq_a.intersection(seq_b)
+                ab_set = seq_a | seq_b
+                matrix[i][j] = float(len(overlap)) / float(len(ab_set))
+                matrix[j][i] = matrix[i][j]
+        matrix = matrix + np.diag([1.0] * len(sessions))
+        degree = np.sum(np.array(matrix), 1)
+        degree = np.diag(1.0 / degree)
+        return matrix, degree
 
-    # category-aware session graph
-    def get_overlap(self, sessions, categories):
+    def get_overlap_c(self, sessions, categories):
         matrix = np.zeros((len(sessions), len(sessions)))
         for i in range(len(sessions)):
             session_a = sessions[i] + categories[i]
@@ -172,8 +171,8 @@ class Data():
             self.cate_raw = self.cate_raw[shuffled_arg]
             self.targets = self.targets[shuffled_arg]
         n_batch = int(self.length / batch_size)
-        if self.length % batch_size != 0:
-            n_batch += 1
+  #      if self.length % batch_size != 0:
+  #          n_batch += 1
         slices = np.split(np.arange(n_batch * batch_size), n_batch)
         slices[-1] = np.arange(self.length - batch_size, self.length)
         return slices

@@ -24,7 +24,6 @@ def trans_to_cpu(variable):
         return variable
 
 
-# multi-head attenntion
 # class SelfAttention(Module):
 #     def __init__(self, dim_in, dim_k, dim_v, num_heads=8):
 #         super(SelfAttention, self).__init__()
@@ -54,7 +53,7 @@ def trans_to_cpu(variable):
 #
 #         att = torch.bmm(dist, v)
 #         return att
-# 自注意力机制
+
 class SelfAttention(Module):
     def __init__(self, dim_in, dim_k, dim_v, num_heads=4):
         super(SelfAttention, self).__init__()
@@ -85,7 +84,20 @@ class SelfAttention(Module):
         att = torch.bmm(dist, v)
         return att
 
-# 残差网络
+        # dk = self.dim_k // nh  # dim_k of each head
+        # dv = self.dim_v // nh  # dim_v of each head
+        # q = self.linear_q(x).reshape(batch, n, nh, dk).transpose(1, 2)  # (batch, nh, n, dk)
+        # k = self.linear_k(x).reshape(batch, n, nh, dk).transpose(1, 2)  # (batch, nh, n, dk)
+        # v = self.linear_v(x).reshape(batch, n, nh, dv).transpose(1, 2)  # (batch, nh, n, dv)
+        #
+        # dist = torch.matmul(q, k.transpose(2, 3)) * self._norm_fact  # batch, nh, n, n
+        # dist = torch.softmax(dist, dim=-1)  # batch, nh, n, n
+        #
+        # att = torch.matmul(dist, v)  # batch, nh, n, dv
+        # att = att.transpose(1, 2).reshape(batch, n, self.dim_v)  # batch, n, dim_v
+        # return att
+
+
 class Residual(Module):
     def __init__(self):
         super().__init__()
@@ -106,10 +118,9 @@ class Residual(Module):
         return out
 
 
-# category-aware hypergraph convolution network
-class CHGCN(Module):
+class HyperConv(Module):
     def __init__(self, layers, dataset, emb_size=100):
-        super(CHGCN, self).__init__()
+        super(HyperConv, self).__init__()
         self.emb_size = emb_size
         self.layers = layers
         self.dataset = dataset
@@ -134,28 +145,36 @@ class CHGCN(Module):
         item_embedding_layer0 = item_embeddings
         final = [item_embedding_layer0]
         for i in range(self.layers):
+            # for i in range(6):
+            #     input_embedding = item_embeddings
             item_embeddings = torch.sparse.mm(trans_to_cuda(adjacency), item_embeddings)
+            # item_embeddings = self.dp(F.relu(item_embeddings))
+            # item_embeddings = item_embeddings + input_embedding
             final.append(item_embeddings)
         item_embeddings = np.sum(final, 0)
         return item_embeddings
 
-# category-aware session graph
-class CSGCN(Module):
+
+class LineConv(Module):
     def __init__(self, layers, batch_size, emb_size=100):
-        super(CSGCN, self).__init__()
+        super(LineConv, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
         self.layers = layers
 
     def forward(self, item_embedding, D, A, session_item, session_len, session_item_cat):
         zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
+        # zeros = torch.zeros([1,self.emb_size])
         item_embedding = torch.cat([zeros, item_embedding], 0)
         seq_h = []
         for i in torch.arange(len(session_item)):
             session_i = session_item[i] + session_item_cat[i]
             seq_h.append(torch.index_select(item_embedding, 0, session_i))
+            # seq_h.append(torch.index_select(item_embedding, 0, session_item[i]))
         seq_h1 = trans_to_cuda(torch.tensor([item.cpu().detach().numpy() for item in seq_h]))
-        session_emb_lgcn = torch.div(torch.sum(seq_h1, 1), (session_len * 2))
+        # 注意力机制
+        # session_emb_lgcn = torch.div(torch.sum(seq_h1, 1), (session_len * 2))
+        session_emb_lgcn = torch.div(torch.sum(seq_h1, 1), session_len)
         session = [session_emb_lgcn]
         DA = torch.mm(D, A).float()
         for i in range(self.layers):
@@ -165,10 +184,10 @@ class CSGCN(Module):
         return session_emb_lgcn
 
 
-class CSGNN(Module):
+class DHCN(Module):
     def __init__(self, adjacency, n_node, c_node, lr, layers, l2, beta, dataset, embedding=None, emb_size=100,
                  batch_size=256):
-        super(CSGNN, self).__init__()
+        super(DHCN, self).__init__()
         self.emb_size = emb_size
         self.batch_size = batch_size
         self.n_node = n_node
@@ -178,17 +197,17 @@ class CSGNN(Module):
         self.layers = layers
         self.beta = beta
         self.adjacency = adjacency
-        # 每隔K个item会产生连接
         self.K = 1
         self.embedding = nn.Embedding(self.n_node + self.c_node, self.emb_size)
-        # 使用预训练的embeddings
         # self.embedding = nn.Embedding.from_pretrained(torch.FloatTensor(embedding), freeze=False)
         self.pos_embedding = nn.Embedding(200, self.emb_size)
-        self.CHGCN = CHGCN(self.layers, dataset, emb_size)
-        self.CSGCN = CSGCN(self.layers, self.batch_size, emb_size)
+        # self.pos_embedding_cate = nn.Embedding(200, self.emb_size)
+        self.HyperGraph = HyperConv(self.layers, dataset, emb_size)
+        self.LineGraph = LineConv(self.layers, self.batch_size, emb_size)
         self.ISA = SelfAttention(self.emb_size, self.emb_size, self.emb_size)
         self.CSA = SelfAttention(self.emb_size, self.emb_size, self.emb_size)
-        self.w_1 = nn.Parameter(torch.Tensor(2 * self.emb_size, self.emb_size))
+        # 加类别为3，不加为2
+        self.w_1 = nn.Parameter(torch.Tensor(3 * self.emb_size, self.emb_size))
         # self.w_4 = nn.Parameter(torch.Tensor(2 * self.emb_size, self.emb_size))
         self.w_2 = nn.Parameter(torch.Tensor(self.emb_size, 1))
         self.w_3 = nn.Parameter(torch.Tensor(2 * self.emb_size, self.emb_size))
@@ -208,6 +227,7 @@ class CSGNN(Module):
     def generate_sess_emb(self, item_embedding, cat_embedding, session_item, session_item_cat, session_len,
                           reversed_sess_item, mask):
         zeros = torch.cuda.FloatTensor(1, self.emb_size).fill_(0)
+        # zeros = torch.zeros(1, self.emb_size)
         item_embedding = torch.cat([zeros, item_embedding], 0)
         cat_embedding = torch.cat([zeros, cat_embedding], 0)
         get = lambda i: item_embedding[reversed_sess_item[i]]
@@ -215,6 +235,7 @@ class CSGNN(Module):
         seq_h = torch.cuda.FloatTensor(self.batch_size, list(reversed_sess_item.shape)[1], self.emb_size).fill_(0)
         seq_l = torch.cuda.FloatTensor(self.batch_size, self.K, self.emb_size).fill_(0)
         seq_h_cat = torch.cuda.FloatTensor(self.batch_size, list(reversed_sess_item.shape)[1], self.emb_size).fill_(0)
+        # seq_h = torch.zeros(self.batch_size, list(reversed_sess_item.shape)[1], self.emb_size)
         for i in torch.arange(session_item.shape[0]):
             seq_h[i] = get(i)
         for i in torch.arange(session_item.shape[0]):
@@ -226,12 +247,15 @@ class CSGNN(Module):
         len = seq_h.shape[1]
         pos_emb = self.pos_embedding.weight[:len]
         pos_emb = pos_emb.unsqueeze(0).repeat(self.batch_size, 1, 1)
+        # pos_emb_cate = self.pos_embedding_cate.weight[:len]
+        # pos_emb_cate = pos_emb_cate.unsqueeze(0).repeat(self.batch_size, 1, 1)
 
         hs = hs.unsqueeze(-2).repeat(1, len, 1)
         attention_seq_h = self.ISA(seq_h)
         attention_seq_h_cat = self.CSA(seq_h_cat)
         # nh = torch.matmul(torch.cat([pos_emb, attention_seq_h], -1), self.w_1)
         # nh_cate = torch.matmul(torch.cat([pos_emb_cate, attention_seq_h_cat], -1), self.w_4)
+        # 全部
         nh = torch.matmul(torch.cat([pos_emb, attention_seq_h, attention_seq_h_cat], -1), self.w_1)
         # nh = torch.matmul(torch.cat([pos_emb, seq_h, seq_h_cat], -1), self.w_1)
         # nh = torch.matmul(torch.cat([seq_h, seq_h_cat], -1), self.w_1)
@@ -249,7 +273,8 @@ class CSGNN(Module):
         session_local = torch.sum(seq_l, 1)
         session_gl = torch.matmul(torch.cat([select, session_local], -1), self.w_3)
 
-        return session_gl
+        # return session_gl
+        return select
 
     def SSL(self, sess_emb_hgnn, sess_emb_lgcn):
         def row_shuffle(embedding):
@@ -272,10 +297,10 @@ class CSGNN(Module):
         return con_loss
 
     def forward(self, session_item, session_len, D, A, reversed_sess_item, mask, session_item_cat):
-        item_embeddings_hg = self.CHGCN(self.adjacency, self.embedding.weight)
+        item_embeddings_hg = self.HyperGraph(self.adjacency, self.embedding.weight)
         sess_emb_hgnn = self.generate_sess_emb(item_embeddings_hg[:self.n_node], item_embeddings_hg[self.n_node:],
                                                session_item, session_item_cat, session_len, reversed_sess_item, mask)
-        session_emb_lg = self.CSGCN(self.embedding.weight, D, A, session_item, session_len, session_item_cat)
+        session_emb_lg = self.LineGraph(self.embedding.weight, D, A, session_item, session_len, session_item_cat)
         con_loss = self.SSL(sess_emb_hgnn, session_emb_lg)
         # gating_sess_emb = torch.matmul(torch.cat([sess_emb_hgnn, session_emb_lg], -1), self.w_4)
         # return item_embeddings_hg, gating_sess_emb, self.beta*con_loss
@@ -286,7 +311,7 @@ class CSGNN(Module):
 def forward(model, i, data):
     tar, session_len, session_item, reversed_sess_item, mask, session_item_cat = data.get_slice(i)
     A_hat, D_hat = data.get_overlap(session_item)
-    # A_hat, D_hat = data.get_overlap(session_item, session_item_cat)
+    # A_hat, D_hat = data.get_overlap_c(session_item, session_item_cat)
     session_item = trans_to_cuda(torch.Tensor(session_item).long())
     session_item_cat = trans_to_cuda(torch.Tensor(session_item_cat).long())
     session_len = trans_to_cuda(torch.Tensor(session_len).long())
@@ -313,7 +338,7 @@ def train_test(model, train_data, test_data):
         loss = loss + con_loss
         loss.backward()
         #        print(loss.item())
-        model.optimizer.step()
+        model.optimizer.step()                                               
         total_loss += loss
         if j % int(len(slices) / 5 + 1) == 0:
             print('[%d/%d] Loss: %.4f' % (j, len(slices), loss.item()))
